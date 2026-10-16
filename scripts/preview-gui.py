@@ -3,7 +3,7 @@
 The real `toki.exe` needs WebView2, the daemon and a populated database. This serves
 `crates/toki-gui/ui/build` over HTTP with SPA fallback and injects a `__TAURI_INTERNALS__`
 stub, so the actual Svelte components render against fixed sample data. It is a *layout and
-token* check, not a correctness check — nothing here touches the real store, and the numbers
+token* check, not a correctness check â€” nothing here touches the real store, and the numbers
 below are invented.
 
     python scripts/preview-gui.py [port]
@@ -122,7 +122,7 @@ def hour_shape(day_ms):
 
 
 def short_label(d):
-    """"Tue 15 Sep" — what `short_weekday` plus `short_date` produce on the Rust side."""
+    """"Tue 15 Sep" â€” what `short_weekday` plus `short_date` produce on the Rust side."""
     return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
 
 
@@ -313,6 +313,22 @@ def stub(busy=False, light=False):
     )
 
 
+def loading_bridge(enabled: bool) -> str:
+    """Hold data requests for a reproducible initial-load preview; no production delays."""
+    if not enabled:
+        return ""
+    return """<script>(()=>{
+      const call=window.__TAURI_INTERNALS__.invoke;
+      const data=new Set(['day_summary','week_totals','app_directory','diagnostics',
+        'idle_threshold_minutes','history_reading','all_domains','ipc_call','current_app']);
+      const pending=[];let held=true;
+      window.__TAURI_INTERNALS__.invoke=(c,a)=>held&&data.has(c)
+        ? new Promise((resolve,reject)=>pending.push(()=>call(c,a).then(resolve,reject)))
+        : call(c,a);
+      window.finishLoading=()=>{held=false;pending.splice(0).forEach(f=>f());};
+    })();</script>"""
+
+
 def hover_row(n: str) -> str:
     """Fire a pointer-enter on the nth ranked-list row, for screenshotting a hover state
     that headless Chrome has no pointer to produce."""
@@ -420,6 +436,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             html = (ROOT / "index.html").read_text(encoding="utf-8")
             head = (
                 stub("busy" in query, "light" in query)
+                + loading_bridge("loading" in query)
                 + probe(query.get("probe", [""])[0])
                 + hover_row(query.get("hover", [""])[0])
                 + click_row(query.get("click", [""])[0])

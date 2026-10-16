@@ -1,7 +1,8 @@
 <script lang="ts">
   import "../app.css";
   import "@fontsource-variable/inter";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { invoke, isTauri } from "@tauri-apps/api/core";
   import { page } from "$app/state";
   import { resolveNow } from "$lib/ipc";
   import { applyTheme, loadPref, resolveTheme } from "$lib/theme";
@@ -18,10 +19,14 @@
   const customFrame = navigator.userAgent.includes("Windows");
 
   onMount(async () => {
-    // `app.html` has already painted the last-applied theme from localStorage. This
-    // reconciles it with the real preference — which for "system" means the OS setting may have
-    // flipped since the window was last open.
-    applyTheme(await resolveTheme(loadPref()));
+    const theme = await resolveTheme(loadPref());
+    applyTheme(theme);
+    // Flush the shell and its theme before revealing the native window. Avoid waiting
+    // for animation frames: hidden webviews may suspend those indefinitely.
+    await tick();
+    if (isTauri()) {
+      await invoke("show_main_window", { dark: theme === "dark" }).catch(console.error);
+    }
 
     // Fire-and-forget: DESIGN.md §6 wants an immediate resolver pass on launch, alongside
     // the daemon's own 5-minute timer. Nothing here waits on it — a page that already

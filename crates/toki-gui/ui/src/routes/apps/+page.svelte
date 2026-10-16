@@ -6,6 +6,8 @@
   import { confirmed, setAppAlias, setIgnored } from "$lib/ipc";
   import { toolbar } from "$lib/toolbar.svelte";
   import AppIcon from "$lib/AppIcon.svelte";
+  import Skeleton from "$lib/Skeleton.svelte";
+  import ListSkeleton from "$lib/ListSkeleton.svelte";
 
   interface AppEntry {
     exePath: string;
@@ -26,6 +28,7 @@
   let days = $state<number | null>(30);
   let rows = $state<AppEntry[]>([]);
   let loading = $state(true);
+  let loaded = $state(false);
   let error = $state<string | null>(null);
   let saveError = $state<string | null>(null);
 
@@ -70,6 +73,7 @@
         { exePath: string; name: string; alias: string | null; ignored: boolean; ms: number }[]
       >("app_directory", { days: range });
       rows = raw.map((r) => ({ ...r, alias: r.alias ?? "" }));
+      loaded = true;
       error = null;
     } catch (e) {
       error = String(e);
@@ -168,7 +172,7 @@
 {/snippet}
 
 <header class="page-head">
-  <div class="display">{loading && rows.length === 0 ? "—" : `${rows.length} seen`}</div>
+  {#if loading && !loaded}<Skeleton width="170px" height="34px" />{:else}<div class="display">{rows.length} seen</div>{/if}
 </header>
 
 {#if saveError}<p class="muted" role="alert">Couldn't save: {saveError}</p>{/if}
@@ -216,8 +220,8 @@
     class:fade-top={!atTop} class:fade-bottom={!atBottom} style:--header-height="{headerHeight}px">
   {#if error}
     <p class="muted">Couldn't read the database: {error}</p>
-  {:else if loading && rows.length === 0}
-    <p class="muted">Loading…</p>
+  {:else if loading && !loaded}
+    <ListSkeleton table />
   {:else if visible.length === 0}
     <p class="muted">{query ? `Nothing matching "${query}".` : "No apps recorded yet."}</p>
   {:else}

@@ -419,6 +419,20 @@ fn system_theme() -> &'static str {
     theme::system_theme()
 }
 
+/// Reveal the shell only after the frontend has applied the saved/system theme.
+#[tauri::command]
+fn show_main_window(window: tauri::WebviewWindow, dark: bool) -> Result<(), String> {
+    let color = if dark {
+        tauri::window::Color(8, 9, 10, 255)
+    } else {
+        tauri::window::Color(255, 255, 255, 255)
+    };
+    // Show even if a platform cannot update its native background.
+    let background = window.set_background_color(Some(color));
+    window.show().map_err(|e| e.to_string())?;
+    background.map_err(|e| e.to_string())
+}
+
 /// The app's own icon as a PNG data URI, or `None` when there is none to show: not on
 /// Windows, or its executable is gone. The UI draws a lettered tile until this answers, so a
 /// slow or missing icon never holds a row up.
@@ -728,6 +742,7 @@ pub fn run() {
                 week_totals,
                 current_app,
                 system_theme,
+                show_main_window,
                 all_apps,
                 all_domains,
                 app_directory,

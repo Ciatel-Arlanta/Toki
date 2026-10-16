@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ListSkeleton from "./ListSkeleton.svelte";
   import { onMount } from "svelte";
   import { slide } from "svelte/transition";
   import { formatDuration } from "./format";
@@ -141,7 +142,7 @@
 
 <section class="card">
   {#if loading}
-    <p class="muted">Loading…</p>
+    <ListSkeleton />
   {:else if error}
     <p class="muted">Couldn't read the database: {error}</p>
   {:else if groups.length === 0}

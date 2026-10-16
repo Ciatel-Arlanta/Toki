@@ -16,6 +16,7 @@
   import { applyPref, loadPref, type ThemePref } from "$lib/theme";
   import { clock, clockText, type ClockPref } from "$lib/clock.svelte";
   import { formatAgo, formatBytes, formatCount, formatDay } from "$lib/format";
+  import Skeleton from "$lib/Skeleton.svelte";
 
   interface DomainRow {
     domain: string;
@@ -59,6 +60,7 @@
     }
   }
   let diag = $state<Diagnostics | null>(null);
+  let diagnosticsLoading = $state(true);
   let domains = $state<DomainRow[]>([]);
 
   // Purely a display preference, so it lives in the webview's own storage rather than
@@ -91,7 +93,8 @@
     // reason: either half failing must not blank the other.
     invoke<Diagnostics>("diagnostics")
       .then((d) => (diag = d))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => (diagnosticsLoading = false));
 
     try {
       const [state, minutes, reading, rawDomains] = await Promise.all([
@@ -274,7 +277,15 @@
     </section>
 
     {#if loading}
-      <p class="muted">Loading…</p>
+      <div class="stack" role="status" aria-label="Loading tracking settings" aria-busy="true">
+        {#each ["Pause", "Idle threshold", "Websites"] as title}
+          <section class="card">
+            <h2>{title}</h2>
+            <div class="skeleton-copy"><Skeleton width="85%" /></div>
+            <Skeleton width="200px" height="30px" round />
+          </section>
+        {/each}
+      </div>
     {:else if error}
       <p class="muted">Couldn't reach the daemon: {error}</p>
     {:else}
@@ -372,6 +383,15 @@
   </div>
 
   <div class="stack">
+    {#if diagnosticsLoading}
+      <section class="card" role="status" aria-label="Loading diagnostics" aria-busy="true">
+        <h2>Diagnostics</h2>
+        <p>What the daemon is doing, and whether it is still doing it.</p>
+        <div class="diagnostic-loading">
+          {#each [1, 2, 3, 4, 5, 6, 7] as row}<Skeleton width="130px" /><Skeleton width="70px" />{/each}
+        </div>
+      </section>
+    {/if}
     {#if diag}
       <section class="card">
         <h2>Diagnostics</h2>
@@ -442,6 +462,8 @@
 </div>
 
 <style>
+  .skeleton-copy { margin: 12px 0 16px; }
+  .diagnostic-loading { display: grid; grid-template-columns: 1fr auto; gap: 18px 16px; margin-top: 16px; }
   .cols {
     display: grid;
     grid-template-columns: 1fr 1fr;

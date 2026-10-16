@@ -11,6 +11,7 @@
   import Timeline from "$lib/Timeline.svelte";
   import Delta from "$lib/Delta.svelte";
   import { toolbar } from "$lib/toolbar.svelte";
+  import ActivitySkeleton from "$lib/ActivitySkeleton.svelte";
 
   /**
    * The local date on screen, held in the URL rather than in a variable, so the Week
@@ -171,6 +172,9 @@
   </div>
 {/snippet}
 
+{#if loading && summary === null && !error}
+  <ActivitySkeleton />
+{:else}
 <header class="page-head">
   <div class="headline">
     <div class="display">{summary ? formatDuration(summary.totalMs) : "—"}</div>
@@ -199,6 +203,8 @@
     ? "Nothing recorded on this day."
     : "Nothing recorded yet today."}
 />
+
+{/if}
 
 <style>
   .card-head {

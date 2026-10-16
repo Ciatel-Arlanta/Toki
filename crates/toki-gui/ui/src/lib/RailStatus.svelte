@@ -5,6 +5,7 @@
   import type { NowPlaying } from "./day";
   import { formatDuration } from "./format";
   import AppIcon from "./AppIcon.svelte";
+  import Skeleton from "./Skeleton.svelte";
 
   /**
    * A timed pause is the one thing on this page that goes stale just by being looked at,
@@ -89,7 +90,9 @@
 <div class="status-foot {status.tone}" role="status">
   <div class="label">{status.label}</div>
 
-  {#if status.tone === "live" && current}
+  {#if daemon.liveness === "checking"}
+    <div class="app" aria-hidden="true"><Skeleton width="84px" /><span class="app-name"></span><Skeleton width="28px" /></div>
+  {:else if status.tone === "live" && current}
     <div class="app">
       <AppIcon
         exePath={current.exePath}

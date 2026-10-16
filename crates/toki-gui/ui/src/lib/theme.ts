@@ -9,7 +9,7 @@ const PREF_KEY = "toki:theme";
 /**
  * The last theme actually applied. Read by the inline script in `app.html` so a launch can
  * paint the right tokens immediately — asking the backend for the system theme is async,
- * and without this a dark-mode start flashes the light `:root` defaults first.
+ * while the native window remains hidden until the real preference is resolved.
  */
 const RESOLVED_KEY = "toki:theme-resolved";
 
@@ -38,7 +38,7 @@ export function applyTheme(theme: Theme): void {
   try {
     localStorage.setItem(RESOLVED_KEY, theme);
   } catch {
-    // Only costs the next launch a flash.
+    // The next launch can still resolve the preference before showing the window.
   }
 }
 

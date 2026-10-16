@@ -9,6 +9,7 @@
   import RankedList from "$lib/RankedList.svelte";
   import { toolbar } from "$lib/toolbar.svelte";
   import Delta from "$lib/Delta.svelte";
+  import ActivitySkeleton from "$lib/ActivitySkeleton.svelte";
 
   /** 0 is the current week, 1 last week, and so on. */
   let weeksAgo = $state(0);
@@ -142,6 +143,9 @@
   </div>
 {/snippet}
 
+{#if loading && days.length === 0 && !error}
+  <ActivitySkeleton week />
+{:else}
 <header class="page-head">
   <div class="headline">
     <div class="display">{days.length === 0 ? "—" : formatDuration(totalMs)}</div>
@@ -169,6 +173,7 @@
 {/if}
 
 <RankedList {groups} loading={loading && days.length === 0} {error} {emptyMessage} />
+{/if}
 
 <style>
   .card-head {

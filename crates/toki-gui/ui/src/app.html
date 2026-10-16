@@ -5,18 +5,23 @@
     <link rel="icon" href="%sveltekit.assets%/toki.svg" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Toki</title>
-    <!-- Paints the last-applied theme before anything else renders. Resolving the real
-         preference needs an async call to the backend, so without this the first frame is
-         whatever `:root` says rather than what the user chose. Since UI-REVAMP.md §3 made
-         dark the `:root` default, the flash this now prevents is a dark frame on a light
-         machine - the bright-flash-at-11pm case is covered by the default itself. See
-         $lib/theme.ts. -->
+    <!-- Apply a background before the bundled styles arrive. The native window stays
+         hidden until the saved preference has been reconciled with the system theme. -->
     <script>
+      var t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
       try {
-        var t = localStorage.getItem("toki:theme-resolved");
-        if (t) document.documentElement.dataset.theme = t;
+        var pref = localStorage.getItem("toki:theme");
+        var cached = localStorage.getItem("toki:theme-resolved");
+        if (pref === "light" || pref === "dark") t = pref;
+        else if (cached === "light" || cached === "dark") t = cached;
       } catch (e) {}
+      document.documentElement.dataset.theme = t;
     </script>
+    <style>
+      html { background: #08090a; color-scheme: dark; }
+      html[data-theme="light"] { background: #ffffff; color-scheme: light; }
+      body { margin: 0; background: inherit; }
+    </style>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
