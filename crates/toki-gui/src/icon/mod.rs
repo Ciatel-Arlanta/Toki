@@ -25,13 +25,17 @@ use std::sync::{Mutex, OnceLock};
 static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
 
 /// A `data:image/png;base64,…` URI, ready for an `<img src>`.
+///
+/// The lock is held across the read, so reads run one at a time. Every row asks at once on
+/// first paint, and the shell's first lookups in a process fail when they race: all but one
+/// come back empty, and the miss would then be remembered until the app restarts.
 pub fn data_uri(exe_path: &str) -> Option<String> {
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(hit) = cache.lock().ok()?.get(exe_path) {
+    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    if let Some(hit) = cache.get(exe_path) {
         return hit.clone();
     }
     let uri = rgba(exe_path).and_then(|(w, h, px)| encode(w, h, &px));
-    cache.lock().ok()?.insert(exe_path.to_owned(), uri.clone());
+    cache.insert(exe_path.to_owned(), uri.clone());
     uri
 }
 
@@ -154,6 +158,31 @@ mod tests {
         assert!(uri.starts_with("data:image/png;base64,iVBOR"));
         assert!(uri.len() > 200);
         assert_eq!(data_uri(r"C:\no\such\app.exe"), None);
+    }
+
+    /// The first page asks for every row's icon at once; a cold shell fails all but one of a
+    /// racing burst.
+    #[cfg(windows)]
+    #[test]
+    fn reads_a_burst_of_icons_asked_for_at_once() {
+        let exes: [&'static str; 8] = [
+            r"C:\Windows\explorer.exe",
+            r"C:\Windows\regedit.exe",
+            r"C:\Windows\System32\cmd.exe",
+            r"C:\Windows\System32\taskmgr.exe",
+            r"C:\Windows\System32\mmc.exe",
+            r"C:\Windows\System32\msinfo32.exe",
+            r"C:\Windows\System32\charmap.exe",
+            r"C:\Windows\System32\control.exe",
+        ];
+        let reads: Vec<_> = exes
+            .iter()
+            .map(|&exe| std::thread::spawn(move || (exe, data_uri(exe).is_some())))
+            .collect();
+        for read in reads {
+            let (exe, found) = read.join().unwrap();
+            assert!(found, "{exe} has an icon");
+        }
     }
 
     #[test]
