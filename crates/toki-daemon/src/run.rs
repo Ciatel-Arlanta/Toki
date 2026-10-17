@@ -528,9 +528,14 @@ impl Collector {
             return;
         }
         // Touches the disk, which is why it happens here rather than in the hook callback.
-        if let Some(name) = window::display_name(w) {
+        let detected = window::detect(w);
+        if let Some(name) = detected.name {
             let r = self.store.set_detected_name(&w.exe_path, &name);
             self.aux_write("detected name", r);
+        }
+        if let Some(icon) = detected.icon {
+            let r = self.store.set_detected_icon(&w.exe_path, &icon);
+            self.aux_write("detected icon", r);
         }
         self.apps.insert(
             w.exe_path.clone(),
