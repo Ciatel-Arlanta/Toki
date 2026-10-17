@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use chrono::Utc;
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
-use ksni::{Icon, MenuItem, ToolTip, Tray};
-use tracing::warn;
+use ksni::{Icon, MenuItem, OfflineReason, ToolTip, Tray};
+use tracing::{info, warn};
 
 use toki_core::event::Millis;
 
@@ -24,10 +24,20 @@ struct TokiTray {
     paused: bool,
 }
 
-/// Put the icon in the tray. Without a host — no bar, or a bar with no tray module — this
-/// logs once and the daemon carries on; the tray is a convenience, not the collector.
+/// Put the icon in the tray, now or whenever a tray host appears.
+///
+/// The collector starts with the graphical session, which on Omarchy is before the shell
+/// that hosts the tray: quickshell came up three minutes after the daemon on 2026-10-17. A
+/// single attempt then failed with no watcher on the bus, and the icon never appeared,
+/// though tracking ran all along. So a missing watcher is not an error: the service stays
+/// on the bus and registers the moment one takes the name, and again each time the shell
+/// restarts, as Omarchy's does on a theme change. Without any host ever, it waits quietly;
+/// the tray is a convenience, not the collector.
 pub fn spawn() {
-    match (TokiTray { paused: false }).spawn() {
+    match (TokiTray { paused: false })
+        .assume_sni_available(true)
+        .spawn()
+    {
         Ok(handle) => {
             let _ = HANDLE.set(handle);
         }
@@ -132,6 +142,20 @@ impl Tray for TokiTray {
             .into(),
             ..Default::default()
         }
+    }
+
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        match reason {
+            OfflineReason::No => info!("tray host went away; the icon returns with it"),
+            OfflineReason::Error(e) => info!(%e, "no tray host yet; the icon appears with one"),
+            _ => {}
+        }
+        // Keep waiting: the host coming back is what puts the icon back.
+        true
+    }
+
+    fn watcher_online(&self) {
+        info!("tray host appeared; registering the icon");
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
