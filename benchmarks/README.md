@@ -24,6 +24,15 @@ works on does not count.
 | step 2: read in place, copy only as a fallback | **0 B** | 74 ms | 2.2 → 3.7 MB | 83.2% |
 | step 3: name from titles first | 0 B | 67 ms | 3.2 → 4.1 MB | 83.2% |
 
+On Linux (Omarchy, Hyprland), same pass, release build: three sources, Zen running with its
+history in WAL mode under an exclusive lock, Chromium running, and a second Zen profile. The
+copy was Zen's 5.2 MB database plus its 2.3 MB WAL, on every pass while the browser ran.
+
+| Version | Written to disk | Time (24 h / all) | Private memory (before → peak) | Hit rate (24 h / all) |
+|---|---|---|---|---|
+| step 3, `nolock=1`: SQLite refuses WAL, so Zen is copied | 7.5 MB | 18 / 8 ms | 0.6 → 0.9 MB | 100% / 97.9% |
+| step 5: `unix-none` VFS, WAL index in memory | **0 B** | 1 / 3 ms | 0.6 → 0.7–1.0 MB | 100% / 97.9% |
+
 Hit rate is history's: resolved over resolvable. It drifts by a few tenths between rows
 because each run reads the live data as it is that day. Times vary by about ±30% run to
 run; the first run after a while is slower (cold disk cache).
