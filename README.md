@@ -61,6 +61,9 @@ Everything stays on your machine; nothing is sent anywhere.
   It looks up only the domains it is already showing, keeps the icons in memory and never
   writes them or any page address anywhere, and fetches nothing from the internet. It
   follows the same Settings → Websites switch: off, and no favicon file is opened.
+- **App icons on Linux.** The collector notes the icon each app's `.desktop` entry names,
+  and the window reads that image from your icon theme or the path the entry gives. Nothing
+  is fetched or written.
 - **Logs** hold timings, counts and errors, never titles or domains.
 
 ## Architecture

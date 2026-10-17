@@ -174,6 +174,13 @@ process is `SystemSettings`. Resolve by walking child windows for the hosting pr
 
 Key on full exe path. Resolve display name lazily from the version resource.
 
+Linux has no version resource and no icon inside an executable. Both come from the app's
+`.desktop` entry, matched surest first: file name equal to the Wayland app id, then
+`StartupWMClass`, then a web app's URL, then the executable. Only the collector sees the app
+id, so it stores the entry's `Icon=` in `apps.icon`. The GUI resolves that through the icon
+theme per the freedesktop specification, and scales any PNG over 64 px down before the
+webview holds it, since a webview keeps every image decoded at full size.
+
 Ship a default, user-editable ignore list: `TextInputHost` (Windows Input Experience),
 `SearchHost`, unresolvable `ApplicationFrameHost`, and overlay processes such as
 `NVIDIA Overlay`, which take foreground briefly and pollute the data.
@@ -318,7 +325,8 @@ CREATE TABLE apps (
   exe_path      TEXT NOT NULL UNIQUE,
   detected_name TEXT,
   alias         TEXT,
-  ignored       INTEGER NOT NULL DEFAULT 0
+  ignored       INTEGER NOT NULL DEFAULT 0,
+  icon          TEXT                     -- Linux: the .desktop entry's Icon= (§5)
 );
 
 CREATE TABLE domains (
