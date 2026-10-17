@@ -137,7 +137,10 @@ enum Rank {
     Id,
     WmClass,
     WebApp,
-    Exe,
+    /// `Exec=` runs exactly this executable.
+    ExePath,
+    /// `Exec=` runs one of the same file name, such as a launcher on `PATH`.
+    ExeName,
     /// Only for an app matched from its record: the entry its name was read from.
     Name,
 }
@@ -194,6 +197,18 @@ impl Target {
         }
     }
 
+    /// Whether a file-name match can be this app. A window always can. A recorded app
+    /// whose name came from an entry needs this one to carry that name: two installs of one
+    /// program share a file name, and `/usr/lib/t3code/t3code`, whose entry was gone, must
+    /// not take `/usr/lib/t3code-nightly/t3code`'s icon. A name that is only the file name
+    /// says no entry was ever found, so it rules nothing out.
+    fn same_app_by_name(&self, e: &DesktopEntry) -> bool {
+        match &self.name {
+            None => true,
+            Some(n) => *n == e.name || *n == self.program,
+        }
+    }
+
     fn rank(&self, e: &DesktopEntry) -> Option<Rank> {
         if !self.class.is_empty() && e.id.eq_ignore_ascii_case(&self.class) {
             return Some(Rank::Id);
@@ -209,12 +224,19 @@ impl Target {
             return Some(Rank::WebApp);
         }
         // Guarded: with no executable known, an entry with an empty `Exec=` would match.
-        let first = e.exec.split_whitespace().next().unwrap_or("");
-        if !self.exe.is_empty()
-            && !first.is_empty()
-            && (first == self.exe || exe_name(first.trim_matches('"')) == self.program)
-        {
-            return Some(Rank::Exe);
+        let first = e
+            .exec
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('"');
+        if !self.exe.is_empty() && !first.is_empty() {
+            if first == self.exe {
+                return Some(Rank::ExePath);
+            }
+            if exe_name(first) == self.program && self.same_app_by_name(e) {
+                return Some(Rank::ExeName);
+            }
         }
         self.name
             .as_ref()
@@ -529,9 +551,43 @@ mod tests {
     }
 
     #[test]
+    fn a_second_install_of_the_same_program_does_not_take_the_others_icon() {
+        let nightly = entry(
+            "T3 Code (Nightly)",
+            "\"/usr/lib/t3code-nightly/t3code\" %U",
+            "Icon=nightly",
+        );
+        let server = entry("Foot Server", "foot --server", "Icon=foot-server");
+        let foot = entry("Foot", "foot", "Icon=foot");
+        let (_tmp, dirs) = dirs(
+            &[("com.t3tools.T3Code", &nightly)],
+            &[("foot-server", &server), ("foot", &foot)],
+        );
+        let apps = [
+            ("/usr/lib/t3code/t3code", "T3 Code (Beta)"),
+            ("/usr/lib/t3code-nightly/t3code", "T3 Code (Nightly)"),
+            ("/usr/bin/foot", "Foot"),
+        ]
+        .map(|(k, n)| (k.to_string(), Some(n.to_string())));
+
+        let mut got = icons_in(&dirs, &apps);
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("/usr/bin/foot".to_string(), "foot".to_string()),
+                (
+                    "/usr/lib/t3code-nightly/t3code".to_string(),
+                    "nightly".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn a_detected_name_is_only_the_last_resort() {
         let by_name = entry("Foot", "something-else", "Icon=wrong");
-        let by_exe = entry("Terminal", "foot", "Icon=foot");
+        let by_exe = entry("Terminal", "/usr/bin/foot", "Icon=foot");
         let (_tmp, dirs) = dirs(&[("a", &by_name), ("b", &by_exe)], &[]);
         let foot = Target::of_record("/usr/bin/foot", Some("Foot"));
         let found = best_entries(&dirs, &[&foot]).pop().flatten().unwrap();
