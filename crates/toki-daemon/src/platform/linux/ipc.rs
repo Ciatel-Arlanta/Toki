@@ -19,9 +19,11 @@ use crate::state::Shared;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
-/// A client that connects and then says nothing would otherwise hold the only server
-/// thread forever.
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one read or write may stall, the same bound the Windows pipe has. The GUI writes
+/// its request the moment it connects, so a client quiet this long is broken, and the one
+/// server thread moves on to whoever is waiting behind it rather than holding them for long
+/// enough to read the daemon as hung.
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Ask the server to shut down. Safe to call before it has started.
 ///
