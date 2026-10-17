@@ -433,9 +433,9 @@ fn show_main_window(window: tauri::WebviewWindow, dark: bool) -> Result<(), Stri
     background.map_err(|e| e.to_string())
 }
 
-/// The app's own icon as a PNG data URI, or `None` when there is none to show: not on
-/// Windows, or its executable is gone. The UI draws a lettered tile until this answers, so a
-/// slow or missing icon never holds a row up.
+/// The app's own icon as a `data:` URI, or `None` when there is none to show: its
+/// executable is gone, or on Linux, its `.desktop` entry names none the theme has. The UI
+/// draws a lettered tile until this answers, so a slow or missing icon never holds a row up.
 #[tauri::command(async)]
 fn app_icon(exe_path: String) -> Option<String> {
     icon::data_uri(&exe_path)

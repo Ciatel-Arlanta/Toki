@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::platform::Window;
+use crate::platform::{Detected, Window};
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH};
@@ -152,12 +152,26 @@ fn uwp_child(frame: HWND, host_pid: u32) -> Option<(u32, String)> {
     search.found
 }
 
+/// What Windows can say about an app: its name. The icon is the executable's own, which
+/// the GUI reads itself.
+pub fn detect(window: &Window) -> Detected {
+    Detected {
+        name: display_name(window),
+        icon: None,
+    }
+}
+
+/// Nothing: the GUI reads every app's icon out of its executable, recorded or not.
+pub fn recorded_icons(_apps: &[(String, Option<String>)]) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// `FileDescription` from an executable's version resource — "Google Chrome" for
 /// `chrome.exe`.
 ///
 /// Absent for plenty of programs, in which case the caller falls back to the file name.
 /// Read once per app and cached in the database, because it touches the disk.
-pub fn display_name(window: &Window) -> Option<String> {
+fn display_name(window: &Window) -> Option<String> {
     // Asked of the process rather than taken from `exe_path`, which has had any version
     // folder taken out and so may not be a file at all.
     let path = wide(&exe_path_of(window.pid).unwrap_or_else(|| window.exe_path.clone()));

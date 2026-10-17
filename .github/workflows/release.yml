@@ -12,6 +12,17 @@ on:
       tag:
         description: "Existing tag to build, e.g. v0.3.0"
         required: true
+      # For adding a platform to a release after the fact: the packages are built from
+      # this commit and still go to the tag's release. Empty builds the tag itself.
+      ref:
+        description: "Branch or commit to build instead of the tag (optional)"
+        required: false
+        default: ""
+      # Leaves the release's Windows installer exactly as it is, e.g. one uploaded by hand.
+      linux_only:
+        description: "Build only the Linux packages"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -25,16 +36,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-          # The oldest supported Ubuntu, because a binary links against the glibc it was
-          # built on and runs only where that one or newer is present.
-          - os: ubuntu-22.04
+        # ubuntu-22.04 is the oldest supported Ubuntu, because a binary links against the
+        # glibc it was built on and runs only where that one or newer is present. A tag push
+        # has no inputs, so it always builds both.
+        os: ${{ fromJSON(inputs.linux_only && '["ubuntu-22.04"]' || '["windows-latest", "ubuntu-22.04"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ inputs.ref || env.TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
 

@@ -76,6 +76,9 @@ const MIGRATIONS: &[&str] = &[
     "UPDATE meta
      SET v = json_set(v, '$.buckets[7]', json_object('count', 0, 'total_ms', 0))
      WHERE k = 'idle_histogram' AND json_valid(v);",
+    // -> 6: the icon an app's launcher entry names, for the GUI to draw beside it. Filled
+    // in by the collector the next time each app comes forward; see `set_detected_icon`.
+    "ALTER TABLE apps ADD COLUMN icon TEXT;",
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
@@ -148,7 +151,10 @@ CREATE TABLE IF NOT EXISTS apps (
   detected_name TEXT,
   alias         TEXT,
   engine        INTEGER,
-  ignored       INTEGER NOT NULL DEFAULT 0
+  ignored       INTEGER NOT NULL DEFAULT 0,
+  -- The `Icon=` of the app's `.desktop` entry on Linux: a theme icon name, or an absolute
+  -- path. NULL on Windows, where the icon is read out of the executable instead.
+  icon          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS domains (
@@ -515,6 +521,45 @@ impl Store {
             params![exe_path, name],
         )?;
         Ok(())
+    }
+
+    /// Record the icon an app's launcher entry names, as the collector last found it.
+    ///
+    /// Unlike the name, this follows the app: an icon is not history anyone has been reading,
+    /// and a package that changes its icon should change it here too. Only written when it
+    /// differs, so the once-per-run lookup costs no write on every start.
+    pub fn set_detected_icon(&self, exe_path: &str, icon: &str) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
+        self.conn.execute(
+            "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
+            params![exe_path],
+        )?;
+        self.conn.execute(
+            "UPDATE apps SET icon = ?2 WHERE exe_path = ?1 AND icon IS NOT ?2",
+            params![exe_path, icon],
+        )?;
+        Ok(())
+    }
+
+    /// Every app with no icon recorded, with its detected name: `(exe_path, name)`.
+    pub fn apps_without_icon(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT exe_path, detected_name FROM apps WHERE icon IS NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// The icon [`Store::set_detected_icon`] recorded for an app, if any.
+    pub fn detected_icon(&self, exe_path: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT icon FROM apps WHERE exe_path = ?1",
+                params![canonical_exe_path(exe_path)],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
     }
 
     /// Executables the user has marked as not worth recording.
@@ -1676,7 +1721,8 @@ fn merge_app_into(tx: &Transaction, from: i64, into: i64) -> Result<()> {
            detected_name = COALESCE(detected_name, (SELECT detected_name FROM apps WHERE id = ?1)),
            alias         = COALESCE(alias,         (SELECT alias         FROM apps WHERE id = ?1)),
            engine        = COALESCE(engine,        (SELECT engine        FROM apps WHERE id = ?1)),
-           ignored       = MAX(ignored,            (SELECT ignored       FROM apps WHERE id = ?1))
+           ignored       = MAX(ignored,            (SELECT ignored       FROM apps WHERE id = ?1)),
+           icon          = COALESCE(icon,          (SELECT icon          FROM apps WHERE id = ?1))
          WHERE id = ?2",
         params![from, into],
     )?;
@@ -1825,6 +1871,23 @@ mod tests {
 
     // ------------------------------------------------------------ migrations
 
+    /// Wind a fresh store back to schema version `v`: the stamp, and the shape that went
+    /// with it, so stepping it forward replays each `ALTER` rather than tripping over the
+    /// column it adds.
+    fn rewind_to(s: &Store, v: i64) {
+        if v < 6 {
+            s.conn
+                .execute_batch("ALTER TABLE apps DROP COLUMN icon;")
+                .unwrap();
+        }
+        if v < 3 {
+            s.conn
+                .execute_batch("DROP INDEX titles_site; ALTER TABLE titles DROP COLUMN site_token;")
+                .unwrap();
+        }
+        s.conn.pragma_update(None, "user_version", v).unwrap();
+    }
+
     /// A helper that reproduces what every database in the wild looked like before the
     /// scaffold existed: schema v1, stamped, with resolution failures recorded in the one
     /// state that then existed for them.
@@ -1847,10 +1910,7 @@ mod tests {
             .execute("UPDATE sessions SET resolve_state = 3", [])
             .unwrap();
         // Back to the version-1 shape, not just the version-1 stamp.
-        s.conn
-            .execute_batch("DROP INDEX titles_site; ALTER TABLE titles DROP COLUMN site_token;")
-            .unwrap();
-        s.conn.pragma_update(None, "user_version", 1).unwrap();
+        rewind_to(&s, 1);
         s
     }
 
@@ -1886,6 +1946,51 @@ mod tests {
         // classification the pass just made.
         migrate(&s.conn).unwrap();
         assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upgrading_adds_an_empty_icon_column_and_keeps_every_app() {
+        let s = store();
+        s.set_detected_name("/usr/bin/foot", "Foot").unwrap();
+        rewind_to(&s, 5);
+
+        migrate(&s.conn).unwrap();
+
+        assert_eq!(s.detected_icon("/usr/bin/foot").unwrap(), None);
+        s.set_detected_icon("/usr/bin/foot", "foot").unwrap();
+        assert_eq!(
+            s.detected_icon("/usr/bin/foot").unwrap().as_deref(),
+            Some("foot")
+        );
+    }
+
+    #[test]
+    fn an_icon_follows_the_app_while_its_name_stays_put() {
+        let s = store();
+        s.set_detected_name("code", "Code").unwrap();
+        s.set_detected_icon("code", "vscode").unwrap();
+        s.set_detected_name("code", "Visual Studio Code").unwrap();
+        s.set_detected_icon("code", "visual-studio-code").unwrap();
+
+        assert_eq!(
+            s.detected_icon("code").unwrap().as_deref(),
+            Some("visual-studio-code")
+        );
+        let name: String = s
+            .conn
+            .query_row(
+                "SELECT detected_name FROM apps WHERE exe_path = 'code'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "Code");
+        assert_eq!(s.detected_icon("never-seen").unwrap(), None);
+        s.set_detected_name("/usr/bin/foot", "Foot").unwrap();
+        assert_eq!(
+            s.apps_without_icon().unwrap(),
+            [("/usr/bin/foot".to_string(), Some("Foot".to_string()))]
+        );
     }
 
     #[test]
@@ -2078,7 +2183,7 @@ mod tests {
         buckets.push(r#"{"count":33,"total_ms":51167291}"#);
         s.set_idle_histogram_json(&format!(r#"{{"buckets":[{}]}}"#, buckets.join(",")))
             .unwrap();
-        s.conn.pragma_update(None, "user_version", 4).unwrap();
+        rewind_to(&s, 4);
 
         migrate(&s.conn).unwrap();
 
@@ -2135,7 +2240,7 @@ mod tests {
                  UPDATE sessions SET resolve_state = 3 WHERE id = {gone};"
             ))
             .unwrap();
-        s.conn.pragma_update(None, "user_version", 3).unwrap();
+        rewind_to(&s, 3);
 
         migrate(&s.conn).unwrap();
 

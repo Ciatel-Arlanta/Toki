@@ -5,13 +5,14 @@
 //! is [`toki_core::resolve`]'s job.
 //!
 //! The live file is read in place whenever that is safe, so a pass normally writes nothing:
-//! - WAL histories (Gecko), and any history whose browser is closed, take an ordinary
-//!   read-only connection. SQLite's locking gives it a consistent snapshot.
-//! - A running Chromium holds its history under an exclusive lock, so a locked open fails.
-//!   It is read with `nolock=1` and validated like a seqlock: only if the file had been quiet
-//!   for [`QUIET`] before the read, and only if its write time and size are unchanged after.
-//!   Under exclusive locking SQLite does not bump the header's change counter on commit
-//!   (measured), but every commit moves the file's write time, open handle or not.
+//! - Any history whose browser leaves it unlocked, and every one whose browser is closed,
+//!   takes an ordinary read-only connection. SQLite's locking gives it a consistent snapshot.
+//! - A running Chromium holds its history under an exclusive lock, and so does a running
+//!   Gecko browser on Linux, so a locked open fails. Such a file is read without locks and
+//!   validated like a seqlock: only if it and its WAL had been quiet for [`QUIET`] before the
+//!   read, and only if their write times and sizes are unchanged after. Under exclusive
+//!   locking SQLite does not bump the header's change counter on commit (measured), but
+//!   every commit moves a file's write time, open handle or not.
 //! - Anything else falls back to copying the file with its journal or WAL, as before.
 //!
 //! An unlocked read is undone if it fails validation: the matcher's results are snapshotted
@@ -21,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+#[cfg(unix)]
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, ErrorCode, OpenFlags, Result};
 use toki_core::event::Millis;
 use toki_core::resolve::{Engine, VisitMatcher};
@@ -30,7 +33,7 @@ const WEBKIT_EPOCH_OFFSET_US: i64 = 11_644_473_600_000_000;
 
 /// How long a history must have gone unwritten before it is read without locks. A commit
 /// writes its pages in a burst of milliseconds, so this is far longer than one takes.
-const QUIET: Duration = Duration::from_secs(2);
+pub(crate) const QUIET: Duration = Duration::from_secs(2);
 
 /// How each source was read since the process started, for `toki-daemon bench`.
 pub static READS_LOCKED: AtomicU64 = AtomicU64::new(0);
@@ -63,20 +66,32 @@ fn read_in_place(
     }
     drop(locked);
 
-    let before = quiet_stamp(path, quiet)?;
-    let conn = open_live(path, "mode=ro&nolock=1")?;
     let kept = matcher.snapshot();
-    let checked = read_visits(&conn, engine, matcher).and_then(|read| {
-        if stamp(path)? != before {
-            return Err(io_error("history was written during the read"));
-        }
-        Ok(read)
-    });
+    let checked = read_unlocked(path, quiet, |conn| read_visits(conn, engine, matcher));
     if checked.is_err() {
         matcher.restore(kept);
     }
     READS_UNLOCKED.fetch_add(u64::from(checked.is_ok()), Ordering::Relaxed);
     checked
+}
+
+/// Run `read` against a browser's file without taking its locks, and keep the answer only if
+/// neither the file nor its WAL had been written for `quiet` before, nor was written during.
+/// A failed check is an error: the caller discards whatever `read` gathered and falls back
+/// to a copy.
+pub(crate) fn read_unlocked<T>(
+    path: &Path,
+    quiet: Duration,
+    read: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let before = quiet_stamp(path, quiet)?;
+    let conn = open_unlocked(path)?;
+    let out = read(&conn)?;
+    drop(conn);
+    if stamp(path)? != before {
+        return Err(io_error("written during the read"));
+    }
+    Ok(out)
 }
 
 /// The fallback: a private copy with its journal or WAL, opened writable so SQLite can roll
@@ -98,6 +113,35 @@ pub(crate) fn open_live(path: &Path, options: &str) -> Result<Connection> {
     )?;
     conn.busy_timeout(Duration::ZERO)?;
     Ok(conn)
+}
+
+/// The browser's own file, read-only and taking no locks, for a history its browser holds
+/// exclusively.
+///
+/// On Windows that is `nolock=1`. On Linux it is the `unix-none` VFS instead, because a
+/// Gecko history is in WAL mode and `nolock=1` makes SQLite refuse WAL outright
+/// (`sqlite3PagerWalSupported`), which sent every pass to a full copy of the database and
+/// its WAL while the browser ran: 7.5 MB for one Zen profile. `unix-none` takes no locks
+/// either, but leaves WAL allowed, and exclusive locking mode, set before the first read,
+/// keeps the WAL index in this connection's memory rather than in a `-shm` file the browser
+/// never made. The WAL is read for what it is: its frames are checksummed, so recovery stops
+/// at the last complete commit and a half-written one is never seen.
+///
+/// Nothing is written. The file is opened read-only at the OS level, a read-only WAL refuses
+/// to checkpoint, and checkpoint-on-close is switched off besides, so closing cannot try to
+/// fold the browser's WAL into its database or delete it.
+fn open_unlocked(path: &Path) -> Result<Connection> {
+    #[cfg(unix)]
+    {
+        let conn = open_live(path, "mode=ro&vfs=unix-none")?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+        conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        Ok(conn)
+    }
+    #[cfg(not(unix))]
+    {
+        open_live(path, "mode=ro&nolock=1")
+    }
 }
 
 /// `file:` URI for a path. Windows separators become `/`, and the characters a URI gives
@@ -124,22 +168,35 @@ pub(crate) fn is_locked(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// What a write changes: the file's last-write time and its size.
-fn stamp(path: &Path) -> Result<(SystemTime, u64)> {
-    let meta = std::fs::metadata(path).map_err(to_sqlite_err)?;
-    Ok((meta.modified().map_err(to_sqlite_err)?, meta.len()))
+/// What a write changes: the last-write time and size of the database, and of its WAL if
+/// it has one. In WAL mode a commit only appends to the WAL; the database itself moves only
+/// when a checkpoint folds the WAL back in.
+type Stamp = [Option<(SystemTime, u64)>; 2];
+
+fn stamp(path: &Path) -> Result<Stamp> {
+    let of = |p: &Path| -> Result<Option<(SystemTime, u64)>> {
+        match std::fs::metadata(p) {
+            Ok(meta) => Ok(Some((meta.modified().map_err(to_sqlite_err)?, meta.len()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(to_sqlite_err(e)),
+        }
+    };
+    let main = of(path)?.ok_or_else(|| io_error("history is missing"))?;
+    Ok([Some(main), of(&append_ext(path, "-wal"))?])
 }
 
-/// The stamp, provided the file has not been written for `quiet`.
-fn quiet_stamp(path: &Path, quiet: Duration) -> Result<(SystemTime, u64)> {
-    let (modified, len) = stamp(path)?;
-    let idle = SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default();
-    if idle < quiet {
+/// The stamp, provided neither file has been written for `quiet`.
+fn quiet_stamp(path: &Path, quiet: Duration) -> Result<Stamp> {
+    let stamp = stamp(path)?;
+    let now = SystemTime::now();
+    let busy = stamp
+        .iter()
+        .flatten()
+        .any(|(modified, _)| now.duration_since(*modified).unwrap_or_default() < quiet);
+    if busy {
         return Err(io_error("history was written moments ago"));
     }
-    Ok((modified, len))
+    Ok(stamp)
 }
 
 fn io_error(message: &str) -> rusqlite::Error {
@@ -591,6 +648,86 @@ mod tests {
         let mut m = session("Claude - Google Chrome", Engine::Chromium, T0 + MIN);
 
         assert!(read_in_place(&path, Engine::Chromium, &mut m, Duration::from_secs(3600)).is_err());
+        assert_eq!(m.host(0), None);
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Zen and Firefox's setup on Linux: exclusive locking entered before WAL, so the index
+    /// lives in the browser's memory and there is no `-shm`, and nothing checkpointed yet, so
+    /// the visit exists only in the WAL. A change is in flight, uncommitted.
+    #[cfg(unix)]
+    fn exclusively_held_wal_history(dir: &Path) -> (PathBuf, Connection) {
+        let path = dir.join("places.sqlite");
+        let browser = Connection::open(&path).unwrap();
+        browser
+            .execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE;
+                 PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT);
+                 CREATE TABLE moz_historyvisits (id INTEGER PRIMARY KEY, place_id INTEGER,
+                                                 visit_date INTEGER);
+                 INSERT INTO moz_places (url, title) VALUES ('https://x.com/', 'Home / X');",
+            )
+            .unwrap();
+        browser
+            .execute(
+                "INSERT INTO moz_historyvisits (place_id, visit_date) VALUES (1, ?1)",
+                [from_millis(T0, Engine::Gecko)],
+            )
+            .unwrap();
+        browser
+            .execute_batch("BEGIN; UPDATE moz_places SET url = 'https://wrong.example/';")
+            .unwrap();
+        (path, browser)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wal_history_held_exclusively_is_read_in_place_with_its_wal_untouched() {
+        let dir = scratch_dir("gecko-exclusive");
+        let (path, browser) = exclusively_held_wal_history(&dir);
+        let wal = append_ext(&path, "-wal");
+        let files = || (std::fs::read(&path).unwrap(), std::fs::read(&wal).unwrap());
+        let before = files();
+        assert!(!before.1.is_empty(), "the visit should be in the WAL only");
+        let mut m = session("Home / X \u{2014} Zen Browser", Engine::Gecko, T0 + MIN);
+
+        let locked = open_live(&path, "mode=ro")
+            .and_then(|c| read_visits(&c, Engine::Gecko, &mut m))
+            .unwrap_err();
+        assert!(is_locked(&locked));
+        let unlocked = READS_UNLOCKED.load(Ordering::Relaxed);
+        let read = read_in_place(&path, Engine::Gecko, &mut m, Duration::ZERO).unwrap();
+
+        assert_eq!(read, 1);
+        assert_eq!(m.host(0), Some("x.com"));
+        assert!(READS_UNLOCKED.load(Ordering::Relaxed) > unlocked);
+        // Not a byte written, not a file made, and the browser carries on as it was.
+        assert!(files() == before);
+        assert!(!append_ext(&path, "-shm").exists());
+        browser.execute_batch("COMMIT;").unwrap();
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wal_written_moments_ago_is_not_read_without_locks() {
+        let dir = scratch_dir("gecko-busy");
+        let (path, browser) = exclusively_held_wal_history(&dir);
+        // The database itself long untouched: only its WAL is fresh.
+        let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+        let mut m = session("Home / X \u{2014} Zen Browser", Engine::Gecko, T0 + MIN);
+
+        assert!(read_in_place(&path, Engine::Gecko, &mut m, Duration::from_secs(60)).is_err());
         assert_eq!(m.host(0), None);
         drop(browser);
         let _ = std::fs::remove_dir_all(&dir);

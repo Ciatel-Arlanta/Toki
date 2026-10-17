@@ -1,20 +1,29 @@
 //! An app's own icon, for the rows that name it.
 //!
-//! Read out of the executable the shell would show in Explorer, drawn once per app and kept
-//! for the life of the window. Nothing is written to disk: this crate owns no state
-//! (lib.rs), and an icon costs a few milliseconds to read again.
+//! On Windows, read out of the executable the shell would show in Explorer. On Linux, the
+//! image the app's `.desktop` entry names, through the icon theme (see `linux`). Either way
+//! drawn once per app and kept for the life of the window. Nothing is written to disk: this
+//! crate owns no state (lib.rs), and an icon costs a few milliseconds to read again.
 //!
-//! Only Windows has a source for these. Elsewhere `png` is always `None` and the UI keeps
-//! its lettered tile, which is also what it shows for an app whose file has since gone.
+//! An app with no icon to show keeps the UI's lettered tile, which is also what it shows
+//! for an app whose file has since gone.
 
 #[cfg(windows)]
 mod win;
-#[cfg(windows)]
-use win::rgba;
 
 #[cfg(not(windows))]
-fn rgba(_exe_path: &str) -> Option<(u32, u32, Vec<u8>)> {
-    None
+mod linux;
+
+/// The icon for `exe_path`, as a `data:` URI, read from wherever this OS keeps it.
+#[cfg(windows)]
+fn read(exe_path: &str) -> Option<String> {
+    let (w, h, px) = win::rgba(exe_path)?;
+    encode(w, h, &px)
+}
+
+#[cfg(not(windows))]
+fn read(exe_path: &str) -> Option<String> {
+    linux::data_uri(exe_path)
 }
 
 use std::collections::HashMap;
@@ -28,24 +37,31 @@ static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new()
 ///
 /// The lock is held across the read, so reads run one at a time. Every row asks at once on
 /// first paint, and the shell's first lookups in a process fail when they race: all but one
-/// come back empty, and the miss would then be remembered until the app restarts.
+/// come back empty, and the miss would then be remembered until the app restarts. On Linux
+/// it also bounds memory: at most one large PNG is being decoded and scaled at a time.
 pub fn data_uri(exe_path: &str) -> Option<String> {
     let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
     if let Some(hit) = cache.get(exe_path) {
         return hit.clone();
     }
-    let uri = rgba(exe_path).and_then(|(w, h, px)| encode(w, h, &px));
+    let uri = read(exe_path);
     cache.insert(exe_path.to_owned(), uri.clone());
     uri
 }
 
+#[cfg(windows)]
 fn encode(width: u32, height: u32, rgba: &[u8]) -> Option<String> {
+    Some(as_uri("image/png", &encode_png(width, height, rgba)?))
+}
+
+/// Straight 8-bit RGBA as a PNG file's bytes.
+fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     let mut png = Vec::new();
     let mut enc = png::Encoder::new(&mut png, width, height);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().ok()?.write_image_data(rgba).ok()?;
-    Some(format!("data:image/png;base64,{}", base64(&png)))
+    Some(png)
 }
 
 /// A site's icon for each of `domains` that a browser has one for, as `data:` URIs.

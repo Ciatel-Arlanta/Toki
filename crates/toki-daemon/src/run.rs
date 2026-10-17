@@ -108,6 +108,7 @@ pub fn run() -> Result<(), String> {
     let _com = audio::Com::init();
 
     let mut collector = Collector::new(store, shared, resolver_tx.clone());
+    collector.fill_missing_icons();
     loop {
         match rx.recv_timeout(TICK) {
             Ok(raw) => {
@@ -522,15 +523,48 @@ impl Collector {
         self.persist_idle_histogram();
     }
 
+    /// Icons for apps recorded without one, once at start. An app learns its icon when it
+    /// comes forward, so without this every app last used before icons were recorded, or
+    /// not since its `.desktop` file arrived, would show its lettered tile until then.
+    /// Apps with no entry at all are looked for again at each start, at the cost of one
+    /// pass over the entries.
+    fn fill_missing_icons(&mut self) {
+        let apps = match self.store.apps_without_icon() {
+            Ok(apps) if !apps.is_empty() => apps,
+            Ok(_) => return,
+            Err(e) => {
+                warn!(%e, "cannot list apps without an icon");
+                return;
+            }
+        };
+        let found = window::recorded_icons(&apps);
+        for (exe_path, icon) in &found {
+            let r = self.store.set_detected_icon(exe_path, icon);
+            self.aux_write("detected icon", r);
+        }
+        if !found.is_empty() {
+            info!(
+                found = found.len(),
+                of = apps.len(),
+                "icons found for recorded apps"
+            );
+        }
+    }
+
     /// Read what the OS can tell us about an app, once, the first time it is seen.
     fn learn(&mut self, w: &Window) {
         if self.apps.contains_key(&w.exe_path) {
             return;
         }
         // Touches the disk, which is why it happens here rather than in the hook callback.
-        if let Some(name) = window::display_name(w) {
+        let detected = window::detect(w);
+        if let Some(name) = detected.name {
             let r = self.store.set_detected_name(&w.exe_path, &name);
             self.aux_write("detected name", r);
+        }
+        if let Some(icon) = detected.icon {
+            let r = self.store.set_detected_icon(&w.exe_path, &icon);
+            self.aux_write("detected icon", r);
         }
         self.apps.insert(
             w.exe_path.clone(),

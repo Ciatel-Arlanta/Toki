@@ -62,6 +62,17 @@ pub enum Raw {
     },
 }
 
+/// What the OS says about an app beyond its path, read once per app per run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Detected {
+    /// The name a person knows it by.
+    pub name: Option<String>,
+    /// What the GUI should draw it with, where that is not the executable itself: the
+    /// `Icon=` of its `.desktop` entry on Linux. Always `None` on Windows, where the GUI
+    /// reads the icon out of the executable.
+    pub icon: Option<String>,
+}
+
 /// Everything the collector needs about the window that just came forward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
