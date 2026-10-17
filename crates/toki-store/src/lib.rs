@@ -541,6 +541,15 @@ impl Store {
         Ok(())
     }
 
+    /// Every app with no icon recorded, with its detected name: `(exe_path, name)`.
+    pub fn apps_without_icon(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT exe_path, detected_name FROM apps WHERE icon IS NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     /// The icon [`Store::set_detected_icon`] recorded for an app, if any.
     pub fn detected_icon(&self, exe_path: &str) -> Result<Option<String>> {
         self.conn
@@ -1977,6 +1986,11 @@ mod tests {
             .unwrap();
         assert_eq!(name, "Code");
         assert_eq!(s.detected_icon("never-seen").unwrap(), None);
+        s.set_detected_name("/usr/bin/foot", "Foot").unwrap();
+        assert_eq!(
+            s.apps_without_icon().unwrap(),
+            [("/usr/bin/foot".to_string(), Some("Foot".to_string()))]
+        );
     }
 
     #[test]

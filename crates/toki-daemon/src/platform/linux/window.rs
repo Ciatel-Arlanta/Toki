@@ -72,27 +72,10 @@ fn web_app_host(class: &str) -> Option<&str> {
 /// Read once per app per run and cached in the database, because it reads a directory of
 /// small files.
 pub fn detect(window: &Window) -> Detected {
-    let class = window.class.to_ascii_lowercase();
-    let exe = exe_path_of(window.pid).unwrap_or_else(|| window.exe_path.clone());
-    let program = exe_name(&exe);
-    let host = web_app_host(&window.class);
-    let url = host.map(|h| format!("://{h}"));
-
-    let rank = |e: &DesktopEntry| -> Option<Rank> {
-        if !class.is_empty() && e.id.eq_ignore_ascii_case(&class) {
-            return Some(Rank::Id);
-        }
-        if !class.is_empty() && e.wm_class.eq_ignore_ascii_case(&class) {
-            return Some(Rank::WmClass);
-        }
-        if url.as_ref().is_some_and(|u| e.exec.contains(u.as_str())) {
-            return Some(Rank::WebApp);
-        }
-        let first = e.exec.split_whitespace().next().unwrap_or("");
-        (first == exe || exe_name(first.trim_matches('"')) == program).then_some(Rank::Exe)
-    };
+    let target = Target::of_window(window);
     let dirs = application_dirs();
-    let found = entry_named(&dirs, &window.class).or_else(|| best_entry(&dirs, rank));
+    let found = entry_named(&dirs, &target.app_id)
+        .or_else(|| best_entries(&dirs, &[&target]).pop().flatten());
 
     Detected {
         icon: found
@@ -101,7 +84,7 @@ pub fn detect(window: &Window) -> Detected {
             .filter(|i| !i.is_empty()),
         name: found
             .map(|e| e.name)
-            .or_else(|| host.map(str::to_string))
+            .or_else(|| web_app_host(&window.class).map(str::to_string))
             // Plenty of Linux programs ship no `.desktop` file. Their file name is still
             // kinder than the full path the GUI would otherwise show.
             .or_else(|| {
@@ -111,6 +94,43 @@ pub fn detect(window: &Window) -> Detected {
     }
 }
 
+/// Icons for apps already in the database without one, as `(exe_path, icon)`: every app
+/// last seen before icons were recorded, which otherwise keeps its lettered tile until it
+/// next comes forward, however long that is. Each is `(exe_path, detected name)`.
+///
+/// There is no window to ask, so each is matched on what was stored: an app id where the
+/// key is one (shared runtimes, web apps), the executable where it is a path, and failing
+/// both, the entry whose `Name=` is the name detected from it before. All of them in one
+/// pass over the entries, after the app ids that name their file directly.
+pub fn recorded_icons(apps: &[(String, Option<String>)]) -> Vec<(String, String)> {
+    icons_in(&application_dirs(), apps)
+}
+
+fn icons_in(dirs: &[PathBuf], apps: &[(String, Option<String>)]) -> Vec<(String, String)> {
+    let targets: Vec<Target> = apps
+        .iter()
+        .map(|(key, name)| Target::of_record(key, name.as_deref()))
+        .collect();
+    let mut found: Vec<Option<DesktopEntry>> = targets
+        .iter()
+        .map(|t| entry_named(dirs, &t.app_id))
+        .collect();
+    let rest: Vec<usize> = (0..targets.len()).filter(|&i| found[i].is_none()).collect();
+    if !rest.is_empty() {
+        let asked: Vec<&Target> = rest.iter().map(|&i| &targets[i]).collect();
+        for (i, entry) in rest.into_iter().zip(best_entries(dirs, &asked)) {
+            found[i] = entry;
+        }
+    }
+    apps.iter()
+        .zip(found)
+        .filter_map(|((key, _), e)| {
+            let icon = e?.icon;
+            (!icon.is_empty()).then(|| (key.clone(), icon))
+        })
+        .collect()
+}
+
 /// How sure a `.desktop` entry is to be a window's app, surest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Rank {
@@ -118,9 +138,92 @@ enum Rank {
     WmClass,
     WebApp,
     Exe,
+    /// Only for an app matched from its record: the entry its name was read from.
+    Name,
 }
 
-#[derive(Debug, Default)]
+/// What a `.desktop` entry is matched against: a live window, or an app as recorded.
+struct Target {
+    /// The Wayland app id as given, for finding a file named after it. Empty if unknown.
+    app_id: String,
+    /// The same, lowercased, for comparing.
+    class: String,
+    /// The executable, and its file name. Empty when only the app id is known.
+    exe: String,
+    program: String,
+    /// `://<host>` of a Chromium `--app` window.
+    url: Option<String>,
+    /// The name detected for a recorded app, from the entry it should match again.
+    name: Option<String>,
+}
+
+impl Target {
+    fn of_window(window: &Window) -> Self {
+        let exe = exe_path_of(window.pid).unwrap_or_else(|| window.exe_path.clone());
+        Self {
+            app_id: window.class.clone(),
+            class: window.class.to_ascii_lowercase(),
+            program: exe_name(&exe),
+            exe,
+            url: web_app_host(&window.class).map(|h| format!("://{h}")),
+            name: None,
+        }
+    }
+
+    /// An app by its key, which is an executable path, or an app id when the executable
+    /// was a shared runtime (see `app_key`).
+    fn of_record(key: &str, name: Option<&str>) -> Self {
+        let name = name.filter(|n| !n.is_empty()).map(str::to_string);
+        if key.contains('/') {
+            return Self {
+                app_id: String::new(),
+                class: String::new(),
+                exe: key.to_string(),
+                program: exe_name(key),
+                url: None,
+                name,
+            };
+        }
+        Self {
+            app_id: key.to_string(),
+            class: key.to_ascii_lowercase(),
+            exe: String::new(),
+            program: String::new(),
+            url: web_app_host(key).map(|h| format!("://{h}")),
+            name,
+        }
+    }
+
+    fn rank(&self, e: &DesktopEntry) -> Option<Rank> {
+        if !self.class.is_empty() && e.id.eq_ignore_ascii_case(&self.class) {
+            return Some(Rank::Id);
+        }
+        if !self.class.is_empty() && e.wm_class.eq_ignore_ascii_case(&self.class) {
+            return Some(Rank::WmClass);
+        }
+        if self
+            .url
+            .as_ref()
+            .is_some_and(|u| e.exec.contains(u.as_str()))
+        {
+            return Some(Rank::WebApp);
+        }
+        // Guarded: with no executable known, an entry with an empty `Exec=` would match.
+        let first = e.exec.split_whitespace().next().unwrap_or("");
+        if !self.exe.is_empty()
+            && !first.is_empty()
+            && (first == self.exe || exe_name(first.trim_matches('"')) == self.program)
+        {
+            return Some(Rank::Exe);
+        }
+        self.name
+            .as_ref()
+            .is_some_and(|n| *n == e.name)
+            .then_some(Rank::Name)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct DesktopEntry {
     /// File name without `.desktop`.
     id: String,
@@ -152,8 +255,9 @@ fn application_dirs() -> Vec<PathBuf> {
 ///
 /// The freedesktop convention, and what a well-behaved Wayland app does, is an app id equal
 /// to its desktop file id, so most windows end here after a few `stat`s and one read. The
-/// first file found is the one that shadows the rest, as in [`best_entry`]. One that cannot
-/// be used — no `Name=` — sends the caller to the full scan, which treats it the same way.
+/// first file found is the one that shadows the rest, as in [`best_entries`]. One that
+/// cannot be used — no `Name=` — sends the caller to the full scan, which treats it the
+/// same way.
 fn entry_named(dirs: &[PathBuf], app_id: &str) -> Option<DesktopEntry> {
     if app_id.is_empty() || app_id.contains('/') {
         return None;
@@ -163,17 +267,16 @@ fn entry_named(dirs: &[PathBuf], app_id: &str) -> Option<DesktopEntry> {
     parse_entry(app_id, &std::fs::read_to_string(path).ok()?)
 }
 
-/// The best-ranked application entry, the first of equals in shadowing order, reading one
-/// file at a time and keeping only the best so far, rather than every entry on the system.
-/// Stops early on a match no other entry could beat. Hidden and `NoDisplay` entries still
-/// count: they are often exactly the ones that name a helper window.
-fn best_entry(
-    dirs: &[PathBuf],
-    rank: impl Fn(&DesktopEntry) -> Option<Rank>,
-) -> Option<DesktopEntry> {
+/// The best-ranked application entry for each target, the first of equals in shadowing
+/// order. One pass, reading one file at a time and keeping only the best so far for each
+/// target, rather than every entry on the system; it stops early once every target has a
+/// match nothing could beat. Hidden and `NoDisplay` entries still count: they are often
+/// exactly the ones that name a helper window.
+fn best_entries(dirs: &[PathBuf], targets: &[&Target]) -> Vec<Option<DesktopEntry>> {
+    let mut best: Vec<Option<(Rank, DesktopEntry)>> = vec![None; targets.len()];
+    let mut unsettled = targets.len();
     let mut seen = HashSet::new();
-    let mut best: Option<(Rank, DesktopEntry)> = None;
-    for dir in dirs {
+    'scan: for dir in dirs {
         let Ok(files) = std::fs::read_dir(dir) else {
             continue;
         };
@@ -194,18 +297,23 @@ fn best_entry(
             else {
                 continue;
             };
-            let Some(r) = rank(&entry) else {
-                continue;
-            };
-            if best.as_ref().map_or(true, |(b, _)| r < *b) {
-                best = Some((r, entry));
-                if r == Rank::Id {
-                    return best.map(|(_, e)| e);
+            for (slot, target) in best.iter_mut().zip(targets) {
+                let Some(r) = target.rank(&entry) else {
+                    continue;
+                };
+                if slot.as_ref().map_or(true, |(b, _)| r < *b) {
+                    *slot = Some((r, entry.clone()));
+                    if r == Rank::Id {
+                        unsettled -= 1;
+                    }
                 }
+            }
+            if unsettled == 0 {
+                break 'scan;
             }
         }
     }
-    best.map(|(_, e)| e)
+    best.into_iter().map(|b| b.map(|(_, e)| e)).collect()
 }
 
 /// The `[Desktop Entry]` group's unlocalised keys. Actions and other groups come after it
@@ -338,12 +446,11 @@ mod tests {
         );
         let (_tmp, dirs) = dirs(&[("a-by-exe", &by_exe)], &[("z-by-class", &by_class)]);
 
-        let found = best_entry(&dirs, |e| match e.id.as_str() {
-            "a-by-exe" => Some(Rank::Exe),
-            "z-by-class" => Some(Rank::WmClass),
-            _ => None,
-        })
-        .unwrap();
+        // A window whose app id is `App` and whose executable is `/usr/bin/app`: one entry
+        // matches each, and the app id is the surer.
+        let mut window = Target::of_record("/usr/bin/app", None);
+        window.class = "app".into();
+        let found = best_entries(&dirs, &[&window]).pop().flatten().unwrap();
         assert_eq!(
             (found.name.as_str(), found.icon.as_str()),
             ("By Class", "class-icon")
@@ -357,7 +464,8 @@ mod tests {
         let (_tmp, dirs) = dirs(&[("foot", &user)], &[("foot", &system)]);
 
         assert_eq!(entry_named(&dirs, "foot").unwrap().icon, "my-foot");
-        let scanned = best_entry(&dirs, |_| Some(Rank::Exe)).unwrap();
+        let foot = Target::of_record("/usr/bin/foot", None);
+        let scanned = best_entries(&dirs, &[&foot]).pop().flatten().unwrap();
         assert_eq!(scanned.icon, "my-foot");
     }
 
@@ -376,5 +484,57 @@ mod tests {
         assert!(entry_named(&dirs, "").is_none());
         assert!(entry_named(&dirs, "../com.t3tools.T3Code").is_none());
         assert!(entry_named(&dirs, "org.example.Missing").is_none());
+    }
+
+    #[test]
+    fn apps_recorded_without_an_icon_get_one_from_what_was_stored() {
+        let whatsapp = entry(
+            "WhatsApp",
+            "omarchy-launch-webapp https://web.whatsapp.com/",
+            "Icon=whatsapp",
+        );
+        let zen = entry(
+            "Zen Browser",
+            "/opt/zen-browser-bin/zen-bin %u",
+            "StartupWMClass=zen\nIcon=zen-browser",
+        );
+        let t3 = entry("T3 Code", "t3code %U", "Icon=/icons/t3.png");
+        let portal = entry("Portal", "/usr/libexec/some-other-path", "Icon=portal");
+        // No `Exec=` at all: must not match an app known only by its id.
+        let bare = "[Desktop Entry]\nName=Bare\nIcon=bare\n".to_string();
+        let (_tmp, dirs) = dirs(
+            &[("WhatsApp", &whatsapp), ("com.t3tools.T3Code", &t3)],
+            &[("zen", &zen), ("portal", &portal), ("bare", &bare)],
+        );
+        let apps = [
+            ("chrome-web.whatsapp.com__-Default", Some("WhatsApp")),
+            ("/opt/zen-browser-bin/zen-bin", Some("Zen Browser")),
+            ("com.t3tools.T3Code", Some("T3 Code")),
+            ("/usr/lib/xdg-desktop-portal-gtk", Some("Portal")),
+            ("/usr/bin/plymouthd", Some("plymouthd")),
+            ("org.example.NoEntry", None),
+        ]
+        .map(|(k, n)| (k.to_string(), n.map(str::to_string)));
+
+        let mut got = icons_in(&dirs, &apps);
+        got.sort();
+        let want = [
+            ("/opt/zen-browser-bin/zen-bin", "zen-browser"),
+            ("/usr/lib/xdg-desktop-portal-gtk", "portal"),
+            ("chrome-web.whatsapp.com__-Default", "whatsapp"),
+            ("com.t3tools.T3Code", "/icons/t3.png"),
+        ]
+        .map(|(k, i)| (k.to_string(), i.to_string()));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_detected_name_is_only_the_last_resort() {
+        let by_name = entry("Foot", "something-else", "Icon=wrong");
+        let by_exe = entry("Terminal", "foot", "Icon=foot");
+        let (_tmp, dirs) = dirs(&[("a", &by_name), ("b", &by_exe)], &[]);
+        let foot = Target::of_record("/usr/bin/foot", Some("Foot"));
+        let found = best_entries(&dirs, &[&foot]).pop().flatten().unwrap();
+        assert_eq!(found.icon, "foot");
     }
 }

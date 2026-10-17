@@ -108,6 +108,7 @@ pub fn run() -> Result<(), String> {
     let _com = audio::Com::init();
 
     let mut collector = Collector::new(store, shared, resolver_tx.clone());
+    collector.fill_missing_icons();
     loop {
         match rx.recv_timeout(TICK) {
             Ok(raw) => {
@@ -520,6 +521,34 @@ impl Collector {
         // Not just on the heartbeat: a clean stop should not throw away the counting done
         // since the last one.
         self.persist_idle_histogram();
+    }
+
+    /// Icons for apps recorded without one, once at start. An app learns its icon when it
+    /// comes forward, so without this every app last used before icons were recorded, or
+    /// not since its `.desktop` file arrived, would show its lettered tile until then.
+    /// Apps with no entry at all are looked for again at each start, at the cost of one
+    /// pass over the entries.
+    fn fill_missing_icons(&mut self) {
+        let apps = match self.store.apps_without_icon() {
+            Ok(apps) if !apps.is_empty() => apps,
+            Ok(_) => return,
+            Err(e) => {
+                warn!(%e, "cannot list apps without an icon");
+                return;
+            }
+        };
+        let found = window::recorded_icons(&apps);
+        for (exe_path, icon) in &found {
+            let r = self.store.set_detected_icon(exe_path, icon);
+            self.aux_write("detected icon", r);
+        }
+        if !found.is_empty() {
+            info!(
+                found = found.len(),
+                of = apps.len(),
+                "icons found for recorded apps"
+            );
+        }
     }
 
     /// Read what the OS can tell us about an app, once, the first time it is seen.

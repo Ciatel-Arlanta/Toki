@@ -161,6 +161,11 @@ pub fn detect(window: &Window) -> Detected {
     }
 }
 
+/// Nothing: the GUI reads every app's icon out of its executable, recorded or not.
+pub fn recorded_icons(_apps: &[(String, Option<String>)]) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// `FileDescription` from an executable's version resource — "Google Chrome" for
 /// `chrome.exe`.
 ///
