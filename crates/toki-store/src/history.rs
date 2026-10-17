@@ -33,7 +33,7 @@ const WEBKIT_EPOCH_OFFSET_US: i64 = 11_644_473_600_000_000;
 
 /// How long a history must have gone unwritten before it is read without locks. A commit
 /// writes its pages in a burst of milliseconds, so this is far longer than one takes.
-const QUIET: Duration = Duration::from_secs(2);
+pub(crate) const QUIET: Duration = Duration::from_secs(2);
 
 /// How each source was read since the process started, for `toki-daemon bench`.
 pub static READS_LOCKED: AtomicU64 = AtomicU64::new(0);
@@ -66,20 +66,32 @@ fn read_in_place(
     }
     drop(locked);
 
-    let before = quiet_stamp(path, quiet)?;
-    let conn = open_unlocked(path)?;
     let kept = matcher.snapshot();
-    let checked = read_visits(&conn, engine, matcher).and_then(|read| {
-        if stamp(path)? != before {
-            return Err(io_error("history was written during the read"));
-        }
-        Ok(read)
-    });
+    let checked = read_unlocked(path, quiet, |conn| read_visits(conn, engine, matcher));
     if checked.is_err() {
         matcher.restore(kept);
     }
     READS_UNLOCKED.fetch_add(u64::from(checked.is_ok()), Ordering::Relaxed);
     checked
+}
+
+/// Run `read` against a browser's file without taking its locks, and keep the answer only if
+/// neither the file nor its WAL had been written for `quiet` before, nor was written during.
+/// A failed check is an error: the caller discards whatever `read` gathered and falls back
+/// to a copy.
+pub(crate) fn read_unlocked<T>(
+    path: &Path,
+    quiet: Duration,
+    read: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let before = quiet_stamp(path, quiet)?;
+    let conn = open_unlocked(path)?;
+    let out = read(&conn)?;
+    drop(conn);
+    if stamp(path)? != before {
+        return Err(io_error("written during the read"));
+    }
+    Ok(out)
 }
 
 /// The fallback: a private copy with its journal or WAL, opened writable so SQLite can roll

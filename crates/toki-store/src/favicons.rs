@@ -8,8 +8,9 @@
 //!   for anything else, though they also hold icons for bookmarked pages.
 //! - Page URLs stay inside the query. What comes back is icon bytes and nothing that says
 //!   which page they came from.
-//! - Nothing is kept. The caller holds the bytes in memory, and a copy made to get past a
-//!   browser's lock is deleted before this returns.
+//! - Nothing is kept. The caller holds the bytes in memory. A file the running browser holds
+//!   locked is read in place without its locks when it has been quiet, exactly as history is
+//!   (see `history`), and only otherwise copied, the copy deleted before this returns.
 //!
 //! Private windows never write favicons, so they are excluded the same way they are from
 //! history.
@@ -21,7 +22,7 @@ use rusqlite::{params_from_iter, Connection, OpenFlags, OptionalExtension, Resul
 use toki_core::resolve::Engine;
 
 use crate::browsers::favicon_sources;
-use crate::history::{is_locked, open_live, TempCopy};
+use crate::history::{is_locked, open_live, read_unlocked, TempCopy, QUIET};
 
 /// Larger than any real favicon, which is a few KB. Anything past this is not one.
 const MAX_BYTES: i64 = 256 * 1024;
@@ -45,7 +46,11 @@ pub fn read(domains: &[String]) -> HashMap<String, Vec<u8>> {
     found
 }
 
-/// One favicon database: in place and read-only first, and on the browser's lock, a copy.
+/// One favicon database: in place and read-only first; on the browser's lock, in place
+/// without locks if the file is quiet; and failing that, a copy.
+///
+/// A running Zen holds a 5 MB database and a WAL of a couple more under its lock, and the
+/// window asks once per batch of rows it draws, so the copy is the case worth avoiding.
 fn read_file(
     path: &Path,
     engine: Engine,
@@ -56,6 +61,16 @@ fn read_file(
     match live {
         Err(e) if is_locked(&e) => {}
         done => return done,
+    }
+    // Into a map of its own, so a read that fails its check leaves nothing behind.
+    let mut fresh = HashMap::new();
+    if read_unlocked(path, QUIET, |conn| {
+        lookup(conn, engine, domains, &mut fresh)
+    })
+    .is_ok()
+    {
+        found.extend(fresh);
+        return Ok(());
     }
     let copy = TempCopy::of(path)?;
     // Writable so SQLite can roll back a hot journal, the same as the history reader.
@@ -275,6 +290,45 @@ mod tests {
         let mut found = HashMap::new();
         assert!(read_file(&missing, Engine::Gecko, &[&d], &mut found).is_err());
         assert!(found.is_empty());
+    }
+
+    /// Zen's favicons on Linux, as its history: exclusive locking entered before WAL, the
+    /// icon only in the WAL, and the lock held for as long as the browser runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_running_browsers_locked_favicons_are_read_in_place() {
+        let dir =
+            std::env::temp_dir().join(format!("toki-favicons-locked-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("favicons.sqlite");
+        let browser = Connection::open(&path).unwrap();
+        browser
+            .execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE;
+                 PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE moz_pages_w_icons (id INTEGER PRIMARY KEY, page_url TEXT);
+                 CREATE TABLE moz_icons (id INTEGER PRIMARY KEY, width INTEGER, data BLOB);
+                 CREATE TABLE moz_icons_to_pages (page_id INTEGER, icon_id INTEGER);
+                 INSERT INTO moz_pages_w_icons VALUES (1, 'https://a.test/');
+                 INSERT INTO moz_icons VALUES (1, 32, x'0102');
+                 INSERT INTO moz_icons_to_pages VALUES (1, 1);",
+            )
+            .unwrap();
+        let d = "a.test".to_string();
+        assert!(open_live(&path, "mode=ro")
+            .and_then(|c| lookup(&c, Engine::Gecko, &[&d], &mut HashMap::new()))
+            .is_err_and(|e| is_locked(&e)));
+
+        let mut found = HashMap::new();
+        read_unlocked(&path, std::time::Duration::ZERO, |c| {
+            lookup(c, Engine::Gecko, &[&d], &mut found)
+        })
+        .unwrap();
+        assert_eq!(found.get("a.test"), Some(&vec![1u8, 2]));
+        assert!(!dir.join("favicons.sqlite-shm").exists());
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
