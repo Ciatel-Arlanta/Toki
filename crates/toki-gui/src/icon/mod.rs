@@ -33,19 +33,34 @@ use std::sync::{Mutex, OnceLock};
 /// otherwise be re-read on every page load.
 static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
 
-/// A `data:image/png;base64,…` URI, ready for an `<img src>`.
+/// Whether icon reads may run side by side yet.
 ///
-/// The lock is held across the read, so reads run one at a time. Every row asks at once on
-/// first paint, and the shell's first lookups in a process fail when they race: all but one
-/// come back empty, and the miss would then be remembered until the app restarts. On Linux
-/// it also bounds memory: at most one large PNG is being decoded and scaled at a time.
+/// Every row asks at once on first paint. On Windows the shell's first lookups in a process
+/// fail when they race: all but one come back empty, and the miss would then be remembered
+/// until the app restarts. So reads run one at a time until one succeeds, then side by side,
+/// which on a cold disk is the difference between seconds and a blink. On Linux the gate
+/// never opens: one read at a time bounds memory to one large PNG being decoded and scaled.
+static OPEN: Mutex<bool> = Mutex::new(false);
+
+/// A `data:image/png;base64,…` URI, ready for an `<img src>`.
 pub fn data_uri(exe_path: &str) -> Option<String> {
-    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
-    if let Some(hit) = cache.get(exe_path) {
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok()?.get(exe_path) {
         return hit.clone();
     }
+    let uri = gated_read(exe_path);
+    cache.lock().ok()?.insert(exe_path.to_owned(), uri.clone());
+    uri
+}
+
+fn gated_read(exe_path: &str) -> Option<String> {
+    let mut open = OPEN.lock().ok()?;
+    if *open {
+        drop(open);
+        return read(exe_path);
+    }
     let uri = read(exe_path);
-    cache.insert(exe_path.to_owned(), uri.clone());
+    *open = cfg!(windows) && uri.is_some();
     uri
 }
 
@@ -177,10 +192,11 @@ mod tests {
     }
 
     /// The first page asks for every row's icon at once; a cold shell fails all but one of a
-    /// racing burst.
+    /// racing burst. A miss first does not warm it, so the burst still has to wait.
     #[cfg(windows)]
     #[test]
     fn reads_a_burst_of_icons_asked_for_at_once() {
+        assert_eq!(data_uri(r"C:\no\such\first.exe"), None);
         let exes: [&'static str; 8] = [
             r"C:\Windows\explorer.exe",
             r"C:\Windows\regedit.exe",
