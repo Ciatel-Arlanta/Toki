@@ -448,9 +448,22 @@ impl Store {
     /// Carry out what the tracker decided. Nothing else writes to `sessions`.
     pub fn apply(&self, action: &Action, tz_offset_min: i32, engine: Option<Engine>) -> Result<()> {
         match action {
-            Action::Emit(session) => self.insert_session(session, tz_offset_min, engine),
+            Action::Emit(session) => self.emit(session, tz_offset_min, engine),
             Action::ExtendLast { end } => self.extend_last(*end),
         }
+    }
+
+    /// One commit per session. Its app, title, site token and row were each a commit of
+    /// their own, rewriting the same pages into the WAL several times over.
+    fn emit(&self, session: &Session, tz_offset_min: i32, engine: Option<Engine>) -> Result<()> {
+        let tx = self.write_tx()?;
+        self.insert_session(session, tz_offset_min, engine)?;
+        let r = tx.commit();
+        if r.is_err() {
+            // The row it names was rolled back.
+            self.last_emitted.set(None);
+        }
+        r
     }
 
     fn insert_session(
@@ -690,8 +703,15 @@ impl Store {
         self.meta_set("last_digest_monday", &monday.to_string())
     }
 
-    pub fn heartbeat(&self, at: Millis) -> Result<()> {
-        self.meta_set("last_seen", &at.to_string())
+    /// `last_seen`, and the idle histogram when there is a new one to keep. One commit: both
+    /// ride every heartbeat, and written apart they doubled its writes.
+    pub fn heartbeat(&self, at: Millis, idle_histogram: Option<&str>) -> Result<()> {
+        let tx = self.write_tx()?;
+        self.meta_set("last_seen", &at.to_string())?;
+        if let Some(json) = idle_histogram {
+            self.set_idle_histogram_json(json)?;
+        }
+        tx.commit()
     }
 
     pub fn last_heartbeat(&self) -> Result<Option<Millis>> {
@@ -2760,7 +2780,7 @@ mod tests {
             engine: None,
         }))
         .unwrap();
-        s.heartbeat(day_start + 23 * HOUR).unwrap();
+        s.heartbeat(day_start + 23 * HOUR, None).unwrap();
 
         let recovered = s.recover().unwrap().expect("dangling session");
         assert_eq!(recovered.end, day_start + 23 * HOUR);
@@ -2773,7 +2793,7 @@ mod tests {
     #[test]
     fn a_mirror_newer_than_the_heartbeat_is_cleared_without_a_row() {
         let s = store();
-        s.heartbeat(1_000).unwrap();
+        s.heartbeat(1_000, None).unwrap();
         s.set_open_session(Some(&OpenSession {
             start: 2_000,
             app: AppKey::new("code.exe"),

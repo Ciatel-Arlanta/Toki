@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use toki_core::event::{AppKey, Millis};
 use toki_core::resolve::Engine;
-use toki_core::{Action, Config, Event, Tracker};
+use toki_core::{Action, Config, Event, IdleHistogram, Tracker};
 use toki_store::{OpenSession, Store};
 
 use crate::platform::{audio, console, idle, ipc, pump, single, tray, window, Raw, Window};
@@ -198,6 +198,8 @@ struct Collector {
     /// The open session as last written to `meta`, so it is only written again when it
     /// actually changes.
     mirrored: Option<OpenSession>,
+    /// The idle histogram as last written, for the same reason.
+    persisted_idle: IdleHistogram,
     /// Whether the last auxiliary `meta` write failed. Exists so a failing database is
     /// reported once rather than every 30 seconds — see [`Collector::aux_write`].
     aux_failing: bool,
@@ -235,6 +237,7 @@ impl Collector {
 
         Self {
             store,
+            persisted_idle: tracker.idle_histogram(),
             tracker,
             apps: HashMap::new(),
             current: None,
@@ -489,24 +492,24 @@ impl Collector {
         self.mirror();
 
         if at >= self.next_heartbeat {
-            let r = self.store.heartbeat(at);
-            self.aux_write("heartbeat", r);
-            self.persist_idle_histogram();
+            self.heartbeat(at);
             self.next_heartbeat = at + HEARTBEAT_MS;
         }
     }
 
-    /// Write the absorbed-idle counts out. Rides the heartbeat rather than firing per tick:
-    /// it is one small `meta` row either way, and at heartbeat cadence a kill costs at most
-    /// the last 30 seconds of counting.
-    fn persist_idle_histogram(&mut self) {
-        match serde_json::to_string(&self.tracker.idle_histogram()) {
-            Ok(json) => {
-                let r = self.store.set_idle_histogram_json(&json);
-                self.aux_write("idle histogram", r);
-            }
-            Err(e) => warn!(%e, "failed to encode idle histogram"),
+    /// Write `last_seen`, and the absorbed-idle counts if they moved. The counts ride the
+    /// heartbeat rather than firing per tick: at heartbeat cadence a kill costs at most the
+    /// last 30 seconds of counting.
+    fn heartbeat(&mut self, at: Millis) {
+        let idle = self.tracker.idle_histogram();
+        let json = (idle != self.persisted_idle)
+            .then(|| serde_json::to_string(&idle).ok())
+            .flatten();
+        let r = self.store.heartbeat(at, json.as_deref());
+        if r.is_ok() && json.is_some() {
+            self.persisted_idle = idle;
         }
+        self.aux_write("heartbeat", r);
     }
 
     /// Close cleanly: at the moment we were told to stop, not at the last heartbeat, and
@@ -516,11 +519,9 @@ impl Collector {
         self.emit(actions);
         let r = self.store.set_open_session(None);
         self.aux_write("clear open session", r);
-        let r = self.store.heartbeat(at);
-        self.aux_write("heartbeat", r);
-        // Not just on the heartbeat: a clean stop should not throw away the counting done
-        // since the last one.
-        self.persist_idle_histogram();
+        // Not just on the timer: a clean stop should not throw away the counting done since
+        // the last one.
+        self.heartbeat(at);
     }
 
     /// Icons for apps recorded without one, once at start. An app learns its icon when it
