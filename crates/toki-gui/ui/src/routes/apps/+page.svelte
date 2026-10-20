@@ -47,18 +47,23 @@
     if (scroller.scrollHeight - scroller.clientHeight <= 2) {
       atTop = atBottom = true;
     } else {
-    atTop = scroller.scrollTop <= 1;
-    atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+      atTop = scroller.scrollTop <= 1;
+      atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
     }
+  }
+
+  // The header only changes height when the table resizes, not on every scroll event.
+  function measure() {
+    measureScroll();
     headerHeight = table?.tHead?.getBoundingClientRect().height ?? 0;
   }
 
   $effect(() => {
     if (!scroller) return;
-    const observer = new ResizeObserver(measureScroll);
+    const observer = new ResizeObserver(measure);
     observer.observe(scroller);
     if (table) observer.observe(table);
-    measureScroll();
+    measure();
     return () => observer.disconnect();
   });
 

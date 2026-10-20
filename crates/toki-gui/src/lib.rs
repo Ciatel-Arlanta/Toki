@@ -436,9 +436,9 @@ fn show_main_window(window: tauri::WebviewWindow, dark: bool) -> Result<(), Stri
 /// The app's own icon as a `data:` URI, or `None` when there is none to show: its
 /// executable is gone, or on Linux, its `.desktop` entry names none the theme has. The UI
 /// draws a lettered tile until this answers, so a slow or missing icon never holds a row up.
-#[tauri::command(async)]
-fn app_icon(exe_path: String) -> Option<String> {
-    icon::data_uri(&exe_path)
+#[tauri::command]
+async fn app_icon(exe_path: String) -> Option<String> {
+    blocking(move || icon::data_uri(&exe_path)).await
 }
 
 /// Icons for the websites a browser row expands into, as `data:` URIs keyed by domain; a
@@ -447,13 +447,13 @@ fn app_icon(exe_path: String) -> Option<String> {
 /// Read from the browsers' own favicon files and never fetched. It honours the same switch
 /// as history reading: with Settings > Websites off, no browser file is opened and every
 /// answer is `None`.
-#[tauri::command(async)]
-fn domain_icons(domains: Vec<String>) -> Result<HashMap<String, Option<String>>, String> {
+#[tauri::command]
+async fn domain_icons(domains: Vec<String>) -> Result<HashMap<String, Option<String>>, String> {
     let allowed = open_store()?.history_reading().map_err(|e| e.to_string())?;
     if !allowed {
         return Ok(domains.into_iter().map(|d| (d, None)).collect());
     }
-    Ok(icon::domain_data_uris(domains))
+    Ok(blocking(move || icon::domain_data_uris(domains)).await)
 }
 
 /// One row of the Apps table: an app, its alias and ignore state, and its time over the
@@ -659,9 +659,20 @@ fn history_reading() -> Result<bool, String> {
 /// The one write path out of the GUI: a raw request forwarded to the daemon's IPC pipe
 /// verbatim, and its raw JSON response handed back. See `ipc` and `toki-daemon`'s
 /// `platform::ipc` for what `request.type` can be.
-#[tauri::command(async)]
-fn ipc_call(request: Value) -> Result<Value, String> {
-    ipc::call(&request).map_err(|e| e.to_string())
+#[tauri::command]
+async fn ipc_call(request: Value) -> Result<Value, String> {
+    blocking(move || ipc::call(&request).map_err(|e| e.to_string())).await
+}
+
+/// Run `f` on the blocking pool. An `async` command runs on one of the runtime's few worker
+/// threads, so a slow file or pipe read there holds up every other command behind it: a
+/// cold disk's worth of icons would stall the page that asked for them.
+///
+/// The join cannot fail short of a panic, and release builds abort on one.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .expect("blocking task panicked")
 }
 
 /// Start the collector beside this executable if it isn't running — after "Quit Toki" in
