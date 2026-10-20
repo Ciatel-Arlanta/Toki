@@ -61,12 +61,16 @@
     onhover?.(exePath);
   }
 
-  const rowAt = (x: number, y: number): string | null =>
-    document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-exe]")?.dataset.exe ?? null;
+  const rowOf = (el: Element | null | undefined): string | null =>
+    el?.closest<HTMLElement>("[data-exe]")?.dataset.exe ?? null;
 
+  const rowAt = (x: number, y: number) => rowOf(document.elementFromPoint(x, y));
+
+  // The event already names the element under the pointer; only a scroll, which moves
+  // rows under a still pointer, needs the hit test.
   function onpointermove(e: PointerEvent) {
     pointer = { x: e.clientX, y: e.clientY };
-    setHot(rowAt(e.clientX, e.clientY));
+    setHot(rowOf(e.target as Element));
   }
 
   function onpointerleave() {
