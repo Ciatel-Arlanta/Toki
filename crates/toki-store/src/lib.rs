@@ -418,7 +418,7 @@ impl Store {
         // SQLite's own recommendation for WAL mode: skip the fsync on most commits, since
         // the WAL file is what a crash recovers from anyway. The default, FULL, fsyncs every
         // commit — measured at ~700x write amplification against the actual row data for a
-        // collector whose crash tolerance already lives in the 30s heartbeat, not in never
+        // collector whose crash tolerance already lives in the 60s heartbeat, not in never
         // losing the last few seconds to an OS crash or power loss.
         conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;

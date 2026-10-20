@@ -32,7 +32,7 @@ use crate::{digest, logging, resolver};
 const TICK: Duration = Duration::from_secs(15);
 /// How often `last_seen` is written. Crash recovery closes a dangling session there, so
 /// this is the worst-case over-count from a power cut.
-const HEARTBEAT_MS: Millis = 30_000;
+const HEARTBEAT_MS: Millis = 60_000;
 /// How long a failed weekly digest waits before the next try.
 const DIGEST_RETRY_MS: Millis = 10 * 60_000;
 /// How far wall time may move between one pass of the loop and the next before the loop is
@@ -201,7 +201,7 @@ struct Collector {
     /// The idle histogram as last written, for the same reason.
     persisted_idle: IdleHistogram,
     /// Whether the last auxiliary `meta` write failed. Exists so a failing database is
-    /// reported once rather than every 30 seconds — see [`Collector::aux_write`].
+    /// reported once rather than every minute — see [`Collector::aux_write`].
     aux_failing: bool,
     /// The IPC server's read side of the pause state. Updated alongside `paused_until`
     /// rather than derived from it on demand, since `get_state` runs on another thread.
@@ -499,7 +499,7 @@ impl Collector {
 
     /// Write `last_seen`, and the absorbed-idle counts if they moved. The counts ride the
     /// heartbeat rather than firing per tick: at heartbeat cadence a kill costs at most the
-    /// last 30 seconds of counting.
+    /// last minute of counting.
     fn heartbeat(&mut self, at: Millis) {
         let idle = self.tracker.idle_histogram();
         let json = (idle != self.persisted_idle)
@@ -601,7 +601,7 @@ impl Collector {
     /// stale timestamp — or misses it altogether — and nothing anywhere says why.
     ///
     /// Logged on the transition rather than per call. All four writes go to one database
-    /// and fail together, so a broken one would otherwise emit a line every 30 seconds,
+    /// and fail together, so a broken one would otherwise emit a line every minute,
     /// burying the first and most useful report under thousands of copies — and writing
     /// hard to a disk that may be full, which is a plausible reason it is failing at all.
     fn aux_write(&mut self, what: &'static str, r: toki_store::Result<()>) {

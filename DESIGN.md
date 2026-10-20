@@ -56,7 +56,7 @@ pure functions, and so a recorded event log can be replayed to reproduce a bad d
 |---|---|
 | Hook | `SetWinEventHook` callback. Pushes to a channel and returns immediately. |
 | Core | Consumes events, applies rules, writes SQLite. Sole writer. |
-| Timer | 15s presence check, 30s heartbeat. The resolver runs on triggers (§6). |
+| Timer | 15s presence check, 60s heartbeat. The resolver runs on triggers (§6). |
 | IPC | Named pipe server. |
 
 The hook callback must stay trivial. Windows silently unhooks callbacks that block, and a
@@ -157,9 +157,9 @@ The precise events are `WM_POWERBROADCAST` (`PBT_APMSUSPEND`) and
 `WTSRegisterSessionNotification` (lock, unlock, fast user switch). Neither fires on a hard
 power-off or a killed process.
 
-**The heartbeat is the actual mechanism.** Write `last_seen` to `meta` every 30s. On startup,
+**The heartbeat is the actual mechanism.** Write `last_seen` to `meta` every 60s. On startup,
 close any dangling session at its last heartbeat. One code path covering suspend, crash,
-power loss and force-kill, capping data loss at 30 seconds. The events are precision
+power loss and force-kill, capping data loss at a minute. The events are precision
 improvements layered on top, worth about 30 seconds of code each.
 
 Without this, a machine that sleeps at 23:00 with an editor focused logs 9 hours of use.
@@ -531,7 +531,7 @@ Windows service — session 0 cannot see the interactive desktop's foreground wi
 
 **Single instance:** named mutex `Global\TokiDaemon`.
 
-**No watchdog.** The heartbeat caps a crash at 30 seconds of lost data, and `toki doctor`
+**No watchdog.** The heartbeat caps a crash at a minute of lost data, and `toki doctor`
 surfaces the gap.
 
 **Tray:** owned by the daemon via `Shell_NotifyIcon`. Menu: open Toki, pause, quit. Without
@@ -594,7 +594,7 @@ window is never told.
 | 3 | 5-second noise floor | 45% of sub-5s focus is a flick away and back; the preceding session is its truthful home (was 2s, raised on measurement) |
 | 4 | Idle 5 min, end backdated to last input | Detection-time ends add ~40 min/day of phantom time |
 | 5 | WASAPI audio presence, 2h cap | Films produce no input; `ES_DISPLAY_REQUIRED` needs admin |
-| 6 | 30s heartbeat as the sleep/crash mechanism | One path covers suspend, crash, power loss, force-kill |
+| 6 | 60s heartbeat as the sleep/crash mechanism | One path covers suspend, crash, power loss, force-kill |
 | 7 | Disk-state domain resolution, deferred | 70 ms per 5 min off the hot path; no browser overhead; incognito structurally excluded |
 | 8 | `places.sqlite`, not `recovery.jsonlz4` | Session file loses closed tabs; deferred resolve needs real history |
 | 9 | Domain granularity only | 0.5%/9.6% ambiguity vs 28% at exact-URL, and exact URLs aren't wanted |
@@ -604,5 +604,5 @@ window is never told.
 | 13 | CLI repair, no delete UI | Silent bad data needs a fix; an accidental click does not |
 | 14 | Named pipe IPC, GUI read-only | Preserves single-writer; gives liveness detection |
 | 15 | OS-agnostic `toki-core` | The buggy logic must be testable without a live desktop |
-| 16 | Run key, no watchdog | No admin; heartbeat caps loss at 30s |
+| 16 | Run key, no watchdog | No admin; heartbeat caps loss at 60s |
 | 17 | Svelte + hand-rolled SVG | No virtual DOM, no charting dependency for five simple views |

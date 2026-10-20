@@ -19,7 +19,7 @@ disk. There is no cloud, no account, and no network code anywhere in the daemon.
   [What it reads and keeps](#what-it-reads-and-keeps).
 - Distinguishes real presence from idle time, with a bounded exemption for audio/video
   playback so a film doesn't get logged as "away."
-- Survives sleep, lock, crash, and a hard power-off without losing more than ~30 seconds
+- Survives sleep, lock, crash, and a hard power-off without losing more than about a minute
   of data, via a heartbeat rather than relying on any single OS notification.
 - Ships a small always-on collector (`toki-daemon.exe`, aiming for under 5 MB resident)
   and a separate GUI (`toki.exe`) that's launched on demand and reads the database
