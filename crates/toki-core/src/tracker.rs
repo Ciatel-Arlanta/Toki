@@ -117,6 +117,20 @@ struct Open {
     /// Set the first time audio kept this session alive past the idle threshold; cleared
     /// when input returns. Also the origin of the audio cap window.
     audio_since: Option<Millis>,
+    /// The last tick that heard it. Meaningful only while `audio_since` is set.
+    audio_heard: Millis,
+}
+
+impl Open {
+    /// The last moment someone was evidently there: the last input, or, while audio was
+    /// holding the session open, the last time it was heard. Ending at the last input then
+    /// would discard the film.
+    fn last_evidence(&self) -> Millis {
+        match self.audio_since {
+            Some(_) => self.audio_heard,
+            None => self.last_input,
+        }
+    }
 }
 
 pub struct Tracker {
@@ -191,6 +205,7 @@ impl Tracker {
                     title,
                     last_input: at,
                     audio_since: None,
+                    audio_heard: at,
                 });
                 actions
             }
@@ -229,6 +244,7 @@ impl Tracker {
         }
 
         if audio() {
+            open.audio_heard = at;
             let since = *open.audio_since.get_or_insert(open.last_input);
             if at - since < self.cfg.audio_cap_ms {
                 return Vec::new();
@@ -239,7 +255,7 @@ impl Tracker {
             return self.close(end);
         }
 
-        let end = open.last_input;
+        let end = open.last_evidence();
         self.close(end)
     }
 
@@ -646,6 +662,28 @@ mod tests {
         let s = emitted(&out);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].end, last_input + 90 * MINUTE);
+        assert_eq!(s[0].presence, Presence::AudioOnly);
+    }
+
+    #[test]
+    fn a_film_that_ends_before_input_returns_keeps_its_time() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "chrome.exe"));
+
+        let last_input = 10 * S;
+        for minute in 5..90 {
+            let out = t.on_tick(last_input + minute * MINUTE, last_input, || true);
+            assert!(out.is_empty(), "closed at minute {minute}");
+        }
+
+        let out = t.on_tick(last_input + 90 * MINUTE, last_input, || false);
+        let s = emitted(&out);
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s[0].end,
+            last_input + 89 * MINUTE,
+            "ends where it was last heard"
+        );
         assert_eq!(s[0].presence, Presence::AudioOnly);
     }
 

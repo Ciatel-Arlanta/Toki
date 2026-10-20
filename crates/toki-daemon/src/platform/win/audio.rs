@@ -1,9 +1,8 @@
 //! Whether the app you are looking at is playing sound.
 //!
 //! This is the exemption that stops a two-hour film from being logged as five minutes. It
-//! is asked only at the moment input silence has already crossed the idle threshold, so the
-//! cost of enumerating audio sessions is paid a handful of times a day rather than every
-//! fifteen seconds.
+//! is asked only once input silence has crossed the idle threshold, then on each tick for
+//! as long as sound holds the session open. An ordinary active stretch never pays for it.
 //!
 //! The comparison is by executable path, not process id. Chromium renders audio from a
 //! separate utility process, so a tab playing a video has a different pid from the window
